@@ -21,62 +21,59 @@ use std::marker::PhantomData;
 const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const BLOCK_SIZE: usize = 32;
 
-const VALIDATE_SIGNATURE_ERROR: i32 = -40001;
-const PARSE_XML_ERROR: i32 = -40002;
-const COMPUTE_SIGNATURE_ERROR: i32 = -40003;
-const ILLEGAL_AES_KEY: i32 = -40004;
-const VALIDATE_CORPID_ERROR: i32 = -40005;
-const ENCRYPT_AES_ERROR: i32 = -40006;
-const DECRYPT_AES_ERROR: i32 = -40007;
-const ILLEGAL_BUFFER: i32 = -40008;
-const ENCODE_BASE64_ERROR: i32 = -40009;
-const DECODE_BASE64_ERROR: i32 = -40010;
-const GEN_XML_ERROR: i32 = -40010;
-const PARSE_JSON_ERROR: i32 = -40012;
-const GEN_JSON_ERROR: i32 = -40013;
-const ILLEGAL_PROTOCOL_TYPE: i32 = -40014;
-
 #[derive(Error, Debug)]
 enum CryptError<'a> {
     #[error("invalid signature (expect: {0}, found: {1})")]
-    ValidateSignatureError(&'a str, &'a str),
+    ValidateSignatureError(&'a str, String),
+
+    #[error("AES key encrypt error (key: {0:?}, enc_data: {1:?}, error: {2})")]
+    AesEncryptError(&'a [u8], &'a [u8], String),
 
     #[error("AES key decrypt error (key: {0:?}, enc_data: {1:?}, error: {2})")]
-    AESDecryptError(&'a [u8], &'a [u8], &'a str),
+    AesDecryptError(Vec<u8>, Vec<u8>, String),
 
     #[error("b64decode error (enc_data: {0}, error: {1})")]
-    Base64DecodeError(&'a str, &'a str),
+    Base64DecodeError(&'a str, String),
 
-    #[error("pkcs7 unpadding error (plain_text: {0:?}, error: {1})")]
-    Pkcs7UnpadError(&'a [u8], &'a str),
+    #[error("pkcs7 padding error (text: {0:?}, error: {1})")]
+    Pkcs7PadError(&'a [u8], String),
+
+    #[error("pkcs7 unpadding error (text: {0:?}, error: {1})")]
+    Pkcs7UnpadError(Vec<u8>, String),
 
     #[error("utf8-str conversion error (vec: {0:?}, error: {1})")]
-    Utf8StringConvError(&'a [u8], &'a str),
+    Utf8StringConvError(Vec<u8>, String),
+
+    #[error("Random String error (error: {0})")]
+    RandomStringError(String),
+
+    #[error("Write Bytes in order error (error: {0})")]
+    WriteBytesError(String),
 }
 
 #[derive(Debug)]
-struct WxWork<'a, 'b> {
+struct WxWork<'a> {
     corp_id: &'a str,
     token: &'a str,
     enc_aes_key: &'a str,
     aes_key: Vec<u8>,
-    _tag: PhantomData<&'b str>,
+    // _tag: PhantomData<&'b str>,
 }
 
-impl<'a, 'b> WxWork<'a, 'b> {
+impl<'a> WxWork<'a> {
     pub fn new(
         corp_id: &'a str,
         token: &'a str,
         enc_aes_key: &'a str,
-    ) -> Result<Self, CryptError<'b>> {
+    ) -> Result<Self, CryptError<'a>> {
         let aes_key = WxWork::decode_aes_key(enc_aes_key)
-            .map_err(|e| CryptError::Base64DecodeError(enc_aes_key, &e.to_string()))?;
+            .map_err(|e| CryptError::Base64DecodeError(&enc_aes_key, e.to_string()))?;
         Ok(WxWork {
             corp_id,
             token,
             enc_aes_key,
             aes_key,
-            _tag: PhantomData::default(),
+            // _tag: PhantomData::default(),
         })
     }
 
@@ -97,7 +94,7 @@ impl<'a, 'b> WxWork<'a, 'b> {
         params.sort_by(|a, b| a.1.cmp(b.1));
         let sorted_params: String = params
             .iter()
-            .map(|(key, value)| format!("{}", value))
+            .map(|(_key, value)| format!("{}", value))
             .collect();
 
         // println!("sorted_params: {}", sorted_params);
@@ -114,48 +111,35 @@ impl<'a, 'b> WxWork<'a, 'b> {
 
     pub fn decrypt(
         &self,
-        timestamp: &str,
-        nonce: &str,
-        signature: &str,
-        data: &str,
-    ) -> Result<String, CryptError> {
+        timestamp: &'a str,
+        nonce: &'a str,
+        signature: &'a str,
+        data: &'a str,
+    ) -> Result<String, CryptError<'a>> {
         let signature_calculated = self.get_sign(timestamp, nonce, data);
 
         // Compare the calculated signature with the provided signature.
         if signature_calculated != signature {
             return Err(CryptError::ValidateSignatureError(
                 signature,
-                &signature_calculated,
+                signature_calculated,
             ));
         }
 
         // Decode the base64-encoded AES message.
         let aes_msg =
-            base64_decode(data).map_err(|e| CryptError::Base64DecodeError(data, &e.to_string()))?;
+            base64_decode(data).map_err(|e| CryptError::Base64DecodeError(data, e.to_string()))?;
         // println!("aes_msg: {:?}", aes_msg);
         // println!("aes_msg_cnt: {:?}", aes_msg.len());
-
         // println!("aes_key: {:?}", &self.aes_key);
 
-        // if self.aes_key.is_none() {
-        //     return Err("aes_key is none");
-        // }
-
         // Decrypt the AES message using the AES key.
-        let mut rand_msg = aes_decrypt(&aes_msg, &self.aes_key)
-            .map_err(|e| CryptError::AESDecryptError(&self.aes_key, &aes_msg, &e.to_string()))?;
+        let rand_msg = aes_decrypt(&aes_msg, &self.aes_key).map_err(|e| {
+            CryptError::AesDecryptError(self.aes_key.clone(), aes_msg.clone(), e.to_string())
+        })?;
 
-        let rand_msg = pkcs7_unpadding(rand_msg, BLOCK_SIZE)
-            .map_err(|e| CryptError::Pkcs7UnpadError(&rand_msg, &e.to_string()))?;
-
-        // match pkcs7_unpadding(rand_msg, BLOCK_SIZE) {
-        //     Ok(res) => {
-        //         rand_msg = res;
-        //     }
-        //     Err(e) => {
-        //         return Err(e);
-        //     }
-        // };
+        let rand_msg = pkcs7_unpadding(rand_msg.clone(), BLOCK_SIZE)
+            .map_err(|e| CryptError::Pkcs7UnpadError(rand_msg, e.to_string()))?;
 
         // Get the content by removing the first 16 random bytes.
         let content = &rand_msg[16..];
@@ -174,43 +158,41 @@ impl<'a, 'b> WxWork<'a, 'b> {
         // std::str::from_utf8(&msg).unwrap()
 
         String::from_utf8(msg.to_vec())
-            .map_err(|e| CryptError::Utf8StringConvError(msg, &e.to_string()))
+            .map_err(|e| CryptError::Utf8StringConvError(msg.to_vec(), e.to_string()))
     }
 
-    pub fn encrypt(
-        &self,
-        timestamp: &str,
-        nonce: &str,
-        reply_msg: String,
-    ) -> Result<String, CryptError> {
-        let rand_str = rand_str(16);
+    // pub fn encrypt(
+    //     &self,
+    //     timestamp: &str,
+    //     nonce: &str,
+    //     reply_msg: String,
+    // ) -> Result<String, CryptError> {
+    //     let rand_str = rand_str(16).map_err(|e| CryptError::RandomStringError(e.to_string()))?;
 
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(rand_str.as_bytes());
+    //     let mut buffer = Vec::new();
+    //     buffer.extend_from_slice(rand_str.as_bytes());
 
-        let mut msg_len_buf = vec![0; 4];
-        (&mut msg_len_buf[..])
-            .write_u32::<BigEndian>(reply_msg.len() as u32)
-            .unwrap();
-        buffer.extend_from_slice(&msg_len_buf);
+    //     let mut msg_len_buf = vec![0; 4];
+    //     (&mut msg_len_buf[..])
+    //         .write_u32::<BigEndian>(reply_msg.len() as u32)
+    //         .map_err(|e| CryptError::WriteBytesError(e.to_string()))?;
 
-        buffer.extend_from_slice(reply_msg.as_bytes());
-        buffer.extend_from_slice(self.corp_id.as_bytes());
+    //     buffer.extend_from_slice(&msg_len_buf);
+    //     buffer.extend_from_slice(reply_msg.as_bytes());
+    //     buffer.extend_from_slice(self.corp_id.as_bytes());
 
-        let pad_msg = pkcs7_padding(buffer, BLOCK_SIZE);
+    //     let pad_msg = pkcs7_padding(buffer, BLOCK_SIZE)
+    //         .map_err(|e| CryptError::Pkcs7PadError(&buffer, e.to_string()))?;
 
-        let ciphertext = aes_encrypt(&pad_msg, &self.aes_key);
+    //     let ciphertext = aes_encrypt(&pad_msg, &self.aes_key)
+    //         .map_err(|e| CryptError::AesEncryptError(&self.aes_key, &pad_msg, e.to_string()))?;
 
-        let ciphertext = engine::GeneralPurpose::new(
-            &alphabet::STANDARD,
-            general_purpose::PAD.with_decode_allow_trailing_bits(true),
-        )
-        .encode(ciphertext);
+    //     let ciphertext = base64_encode(ciphertext);
 
-        let signature = self.get_sign(timestamp, nonce, &ciphertext);
+    //     let signature = self.get_sign(timestamp, nonce, &ciphertext);
 
-        Ok(format!("<xml><Encrypt><![CDATA[{}]]></Encrypt><MsgSignature><![CDATA[{}]]></MsgSignature><TimeStamp>{}</TimeStamp><Nonce><![CDATA[{}]]></Nonce></xml>", ciphertext, signature, timestamp, nonce))
-    }
+    //     Ok(format!("<xml><Encrypt><![CDATA[{}]]></Encrypt><MsgSignature><![CDATA[{}]]></MsgSignature><TimeStamp>{}</TimeStamp><Nonce><![CDATA[{}]]></Nonce></xml>", ciphertext, signature, timestamp, nonce))
+    // }
 }
 
 fn aes_encrypt(plaintext: &[u8], key: &[u8]) -> AnyRs<Vec<u8>> {
@@ -276,6 +258,14 @@ fn pkcs7_unpadding(mut plaintext: Vec<u8>, block_size: usize) -> AnyRs<Vec<u8>> 
 
     plaintext.truncate(plaintext_len - padding_len);
     Ok(plaintext)
+}
+
+fn base64_encode(vs: Vec<u8>) -> String {
+    engine::GeneralPurpose::new(
+        &alphabet::STANDARD,
+        general_purpose::PAD.with_decode_allow_trailing_bits(true),
+    )
+    .encode(vs)
 }
 
 fn base64_decode(s: &str) -> AnyRs<Vec<u8>> {
