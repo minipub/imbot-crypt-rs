@@ -16,7 +16,6 @@ use thiserror::Error;
 use byteorder::{BigEndian, WriteBytesExt};
 use rand::Rng;
 use std::io::Write;
-use std::marker::PhantomData;
 
 const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const BLOCK_SIZE: usize = 32;
@@ -57,7 +56,6 @@ struct WxWork<'a> {
     token: &'a str,
     enc_aes_key: &'a str,
     aes_key: Vec<u8>,
-    // _tag: PhantomData<&'b str>,
 }
 
 impl<'a> WxWork<'a> {
@@ -69,7 +67,6 @@ impl<'a> WxWork<'a> {
             token,
             enc_aes_key,
             aes_key,
-            // _tag: PhantomData::default(),
         })
     }
 
@@ -130,12 +127,16 @@ impl<'a> WxWork<'a> {
         // println!("aes_key: {:?}", &self.aes_key);
 
         // Decrypt the AES message using the AES key.
-        let rand_msg = aes_decrypt(&aes_msg, &self.aes_key).map_err(|e| {
+        let mut rand_msg = aes_decrypt(&aes_msg, &self.aes_key).map_err(|e| {
             CryptError::AesDecryptError(self.aes_key.clone(), aes_msg.clone(), e.to_string())
         })?;
 
-        let rand_msg = pkcs7_unpadding(rand_msg.clone(), BLOCK_SIZE)
-            .map_err(|e| CryptError::Pkcs7UnpadError(rand_msg, e.to_string()))?;
+        let rand_msg = match pkcs7_unpadding(&mut rand_msg, BLOCK_SIZE) {
+            Ok(rs) => rs,
+            Err(e) => {
+                return Err(CryptError::Pkcs7UnpadError(rand_msg, e.to_string()))?;
+            }
+        };
 
         // Get the content by removing the first 16 random bytes.
         let content = &rand_msg[16..];
@@ -235,7 +236,7 @@ fn pkcs7_padding(plaintext: &Vec<u8>, block_size: usize) -> AnyRs<Vec<u8>> {
     Ok(buffer)
 }
 
-fn pkcs7_unpadding(mut plaintext: Vec<u8>, block_size: usize) -> AnyRs<Vec<u8>> {
+fn pkcs7_unpadding<'a>(plaintext: &'a mut Vec<u8>, block_size: usize) -> AnyRs<&'a Vec<u8>> {
     let plaintext_len = plaintext.len();
 
     if plaintext.is_empty() || plaintext_len == 0 {
