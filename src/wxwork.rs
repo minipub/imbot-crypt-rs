@@ -17,11 +17,8 @@ use byteorder::{BigEndian, WriteBytesExt};
 use rand::Rng;
 use std::io::Write;
 
-const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const BLOCK_SIZE: usize = 32;
-
 #[derive(Error, Debug)]
-enum CryptError {
+pub enum CryptError {
     #[error("invalid signature (expect: {0}, found: {1})")]
     ValidateSignatureError(String, String),
 
@@ -51,21 +48,21 @@ enum CryptError {
 }
 
 #[derive(Debug)]
-struct WxWork<'a> {
+pub struct WxWork<'a> {
     corp_id: &'a str,
     token: &'a str,
-    enc_aes_key: &'a str,
     aes_key: Vec<u8>,
 }
 
 impl<'a> WxWork<'a> {
+    const BLOCK_SIZE: usize = 32;
+
     pub fn new(corp_id: &'a str, token: &'a str, enc_aes_key: &'a str) -> Result<Self, CryptError> {
-        let aes_key = WxWork::decode_aes_key(enc_aes_key)
+        let aes_key = Self::decode_aes_key(enc_aes_key)
             .map_err(|e| CryptError::Base64DecodeError(enc_aes_key.to_string(), e.to_string()))?;
         Ok(WxWork {
             corp_id,
             token,
-            enc_aes_key,
             aes_key,
         })
     }
@@ -76,7 +73,7 @@ impl<'a> WxWork<'a> {
         base64_decode(&encoding_aes_key)
     }
 
-    pub fn get_sign(&self, timestamp: &str, nonce: &str, data: &str) -> String {
+    fn get_sign(&self, timestamp: &str, nonce: &str, data: &str) -> String {
         // Sort the parameters in dictionary order and concatenate them into a single string.
         let mut params = vec![
             ("token", self.token),
@@ -131,7 +128,7 @@ impl<'a> WxWork<'a> {
             CryptError::AesDecryptError(self.aes_key.clone(), aes_msg.clone(), e.to_string())
         })?;
 
-        let rand_msg = match pkcs7_unpadding(&mut rand_msg, BLOCK_SIZE) {
+        let rand_msg = match pkcs7_unpadding(&mut rand_msg, Self::BLOCK_SIZE) {
             Ok(rs) => rs,
             Err(e) => {
                 return Err(CryptError::Pkcs7UnpadError(rand_msg, e.to_string()))?;
@@ -178,7 +175,7 @@ impl<'a> WxWork<'a> {
         buffer.extend_from_slice(reply_msg.as_bytes());
         buffer.extend_from_slice(self.corp_id.as_bytes());
 
-        let pad_msg = pkcs7_padding(&buffer, BLOCK_SIZE)
+        let pad_msg = pkcs7_padding(&buffer, Self::BLOCK_SIZE)
             .map_err(|e| CryptError::Pkcs7PadError(buffer, e.to_string()))?;
 
         let ciphertext = aes_encrypt(&pad_msg, &self.aes_key).map_err(|e| {
@@ -284,6 +281,8 @@ fn str_to_uint(slice: &[u8]) -> u32 {
 }
 
 fn rand_str(n: usize) -> AnyRs<String> {
+    const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
     let mut rng = rand::thread_rng();
 
     let mut vs = Vec::with_capacity(n);
